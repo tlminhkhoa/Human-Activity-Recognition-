@@ -1,0 +1,201 @@
+---
+title: "Weight Lifting Exercise"
+author: "Khoa Tran"
+date: "11/08/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here:
+http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+
+
+# Preprocessing
+
+Load the needed library 
+```{r message = FALSE , warning=FALSE}
+library(dplyr)
+library(caret)
+library(cowplot)
+library(randomForest)
+library(ggplot2)
+```
+
+More information can about the dataset can be found at "http://groupware.les.inf.puc-rio.br/har"
+
+
+Download the 2 csv file, save them in a new directory call Data, and load the dataset into R
+```{r}
+# check if the file is downloaded, and create the needed directory
+if(!file.exists("Data")){dir.create("Data")}
+fileName <- "pml-training.csv"
+path <- getwd()
+if(!file.exists(paste(path,"/Data","/",fileName,sep = ""))){
+        url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        download.file(url,destfile = paste(path,"/Data","/",fileName,sep = "")) }
+
+
+fileName <- "pml-testing.csv"
+path <- getwd()
+if(!file.exists(paste(path,"/Data","/",fileName,sep = ""))){
+        url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        download.file(url,destfile = paste(path,"/Data","/",fileName,sep = "")) }
+
+# Load the 2 file into r
+train <- read.csv("./Data/pml-training.csv")[,-1]
+test <- read.csv("./Data/pml-testing.csv")[-1]
+
+str(train)
+dim(train)
+```
+
+At first glance into the structure of the dataset, we can see that there are lots of column with NAs values, and empty string. We should remove them before using any model  
+
+Lets deal NAs columns first. We can count the number of times NA appear in the each column then divide them by the length of the trainset (Since the model will be train base on the trainset). If the percentage excess a certain threshold ( 0.97 in this case ), we can remove them
+```{r message= FALSE}
+naPercent <- apply(is.na(train),2,sum)/ 19622
+
+naPercent
+
+removeFeature <- names(naPercent [naPercent >0.97])
+#  the feautures will be removed
+removeFeature
+
+trainset <- select(train, -removeFeature )
+testset <- select(test,-removeFeature )
+
+```
+
+In addition ,we can remove the near zero variance since they provide less predictive power. Doing this also help us remove the almost all empty string columns
+
+```{r}
+removeFeatureNZR <- nearZeroVar(trainset) 
+trainset <- trainset[,-removeFeatureNZR]
+testset <- testset[,-removeFeatureNZR]
+```
+
+We convert the label into factor 
+```{r}
+trainset$classe <- as.factor(trainset$classe)
+```
+
+Now we can manually look into the dataset to remove the predictor that we think that it do not needed 
+
+cvtd_timestamp,user_name is the two I believe our model will has a difficult time handling
+
+```{r}
+trainset <- select(trainset,-c("cvtd_timestamp","user_name"))
+testset <- select(testset,-c("cvtd_timestamp","user_name"))
+
+# This is how our final trainset look like
+str(trainset)
+dim(trainset)
+```
+
+Split the data into 2 set 1 for training, 1 for validation
+```{r}
+inTrain  <- createDataPartition(trainset$classe, p=0.7, list=FALSE)
+valiSet <- trainset[-inTrain, ]
+trainset  <- trainset[inTrain, ]
+```
+# Model building
+
+We going to use Random Forest for this dataset. 
+
+RandomForest dose't need cross validation, when we train a model,say 100 trees , that each tree use boostrape to sample from original data as train set ,about 1/3 of data not include which is called oob data, and and,since tree have it's oob data we can use it. Because multiple bagging in process of training random forest prevents over-fitting.
+
+```{r eval= FALSE}
+set.seed(123)
+
+rfModel <- randomForest(classe ~. , data = trainset , proximity = TRUE, importance = TRUE)
+
+saveRDS(rfModel, "./Data/rfModel.RDS")
+```
+
+```{r echo= FALSE}
+rfModel <- readRDS("./Data/rfModel.RDS")
+rfModel
+```
+
+The RF model run with only OOB error rate only 0.15%, with 500 trees and 7 variable slipt
+
+
+## Optimization
+
+Our OOB rate is very good already, but lets try and find a way to optimize the model
+
+First lets look at the error rate when the number of tree increase to guess if we can reduce the error by increasing the number of tree or not
+```{r}
+# Re-formating the err.rate to suit ggplot2
+nameError <- dimnames(rfModel$err.rate)[[2]]
+
+error.data <- data.frame(
+        Trees = rep(1:nrow(rfModel$err.rate) , times = dim(rfModel$err.rate)[2]),
+        Type = rep(nameError,each = nrow(rfModel$err.rate)),
+        Error = c(rfModel$err.rate[,nameError[1]],
+                  rfModel$err.rate[,nameError[2]],
+                  rfModel$err.rate[,nameError[3]],
+                  rfModel$err.rate[,nameError[4]],
+                  rfModel$err.rate[,nameError[5]],
+                  rfModel$err.rate[,nameError[6]]
+                  )
+)
+
+
+ggplot(data = error.data , aes(x = Trees , Error)) + geom_line(aes(color = Type))
+```
+
+Seem like the error has level off already and increase the number of tree in the forest will not help us
+
+
+Lets try to change the number of variable slipt , we can try from 1 to 15 as the number of slipt 
+```{r eval= FALSE}
+set.seed(123)
+
+for(i in 1:15){
+        tempModel <- randomForest(classe ~ . , data = trainset , mytry = i)
+
+        saveRDS(tempModel,paste("./Data/tempModel",i,".RDS", sep = ""))
+}
+
+oob.values
+```
+
+```{r}
+oob.values <- vector(length = 15)
+for(i in 1:15){
+        tempModel <- readRDS(paste("./Data/tempModel",i,".RDS", sep = ""))
+        oob.values[i] <- tempModel$err.rate[nrow(tempModel$err.rate),1]
+        
+}
+
+oob.values
+plot(oob.values)
+```
+
+As we can see, the default value of 7 has the minimum out-of-bag values, but we can see the different in oob error is very small throughout the different number of slipt. So there no need to re-train the model
+
+Lets apply the model to the valiSet to see how our model deal with unknown data 
+```{r}
+confusionMatrix(valiSet$classe,predict(rfModel,valiSet))
+```
+
+Our accuracy is 0.9993, therefore your OOB error is 7e-04
+
+Now, just look into our model to see how our model determine the important of each feature
+
+```{r}
+varImpPlot(rfModel)
+```
+
+
+## Prediction
+
+Finally, we can use our model to predict the un-tested data to predict
+```{r}
+predict(rfModel,testset)
